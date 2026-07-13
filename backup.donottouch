@@ -50,8 +50,8 @@
     choices are PRESERVED, so cached ISO/VHDX media is reused and nothing is
     re-downloaded. Combine with -RemoveSwitch to also tear down the vSwitch
     and NAT. The intended fast-fresh flow is:
-        .\1.0.2.ps1 -TearDown      # destroy VMs, clear progress, keep media
-        .\1.0.2.ps1 -SkipValidation # rebuild all VMs from cached media
+        .\Begin.ps1 -TearDown      # destroy VMs, clear progress, keep media
+        .\Begin.ps1 -SkipValidation # rebuild all VMs from cached media
     No Administrator password is needed (tearing a VM down needs no guest
     credentials).
 

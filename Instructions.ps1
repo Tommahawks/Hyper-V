@@ -88,9 +88,15 @@ $htmlContent = @"
 <h2>Quick Start</h2>
 <h3>First Run (Interactive Wizard)</h3>
 <pre><code># Run as Administrator
-.\1.0.2.ps1 -LabRoot E:\HyperV
+.\Begin.ps1 -LabRoot E:\HyperV
 </code></pre>
 <p>The script will:</p>
+</function>
+</tool_call>
+<tool_call>
+<function=replace_string_in_file>
+<parameter=filePath>
+c:\Users\TomCore\Downloads\HPV\Instructions.ps1
 <ol>
 <li>Check prerequisites</li>
 <li>Launch an interactive configuration wizard</li>
@@ -103,13 +109,13 @@ $htmlContent = @"
 </ol>
 <h3>Subsequent Runs</h3>
 <pre><code># Resume interrupted deployment
-.\1.0.2.ps1 -LabRoot E:\HyperV
+.\Begin.ps1 -LabRoot E:\HyperV
 
 # Skip validation (faster, trusts saved state)
-.\1.0.2.ps1 -LabRoot E:\HyperV -SkipValidation
+.\Begin.ps1 -LabRoot E:\HyperV -SkipValidation
 
 # Rebuild from cached media (after -TearDown)
-.\1.0.2.ps1 -LabRoot E:\HyperV -SkipValidation
+.\Begin.ps1 -LabRoot E:\HyperV -SkipValidation
 </code></pre>
 <h2>Parameters</h2>
 <h3><code>-LabRoot</code> (Required)</h3>
@@ -125,7 +131,7 @@ $htmlContent = @"
 <li><code>Logs\</code> - Deployment logs</li>
 </ul>
 <p><strong>Example</strong>:</p>
-<pre><code>.\1.0.2.ps1 -LabRoot E:\HyperV
+<pre><code>.\Begin.ps1 -LabRoot E:\HyperV
 </code></pre>
 <h3><code>-ForceRegenerateScripts</code></h3>
 <p><strong>Type</strong>: Switch<br>
@@ -158,8 +164,8 @@ $htmlContent = @"
 <li>Cached ISO/VHDX media</li>
 </ul>
 <p><strong>Use case</strong>: Fast-fresh flow:</p>
-<pre><code>.\\1.0.2.ps1 -TearDown      # Destroy VMs, clear progress, keep media
-.\\1.0.2.ps1 -SkipValidation # Rebuild all VMs from cached media
+<pre><code>.\Begin.ps1 -TearDown      # Destroy VMs, clear progress, keep media
+.\Begin.ps1 -SkipValidation # Rebuild all VMs from cached media
 </code></pre>
 <h3><code>-RemoveSwitch</code></h3>
 <p><strong>Type</strong>: Switch<br>

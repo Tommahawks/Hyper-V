@@ -42,7 +42,7 @@ This script automates the creation of a complete Hyper-V Active Directory lab en
 
 ```powershell
 # Run as Administrator
-.\1.0.2.ps1 -LabRoot E:\HyperV
+.\Begin.ps1 -LabRoot E:\HyperV
 ```
 
 The script will:
@@ -59,13 +59,13 @@ The script will:
 
 ```powershell
 # Resume interrupted deployment
-.\1.0.2.ps1 -LabRoot E:\HyperV
+.\Begin.ps1 -LabRoot E:\HyperV
 
 # Skip validation (faster, trusts saved state)
-.\1.0.2.ps1 -LabRoot E:\HyperV -SkipValidation
+.\Begin.ps1 -LabRoot E:\HyperV -SkipValidation
 
 # Rebuild from cached media (after -TearDown)
-.\1.0.2.ps1 -LabRoot E:\HyperV -SkipValidation
+.\Begin.ps1 -LabRoot E:\HyperV -SkipValidation
 ```
 
 ## Parameters
@@ -84,7 +84,7 @@ The root folder for all lab resources. This directory will contain:
 
 **Example**:
 ```powershell
-.\1.0.2.ps1 -LabRoot E:\HyperV
+.\Begin.ps1 -LabRoot E:\HyperV
 ```
 
 ### `-ForceRegenerateScripts`
@@ -127,8 +127,8 @@ Destroys existing lab VMs and clears saved build progress, then exits WITHOUT re
 
 **Use case**: Fast-fresh flow:
 ```powershell
-.\1.0.2.ps1 -TearDown      # Destroy VMs, clear progress, keep media
-.\1.0.2.ps1 -SkipValidation # Rebuild all VMs from cached media
+.\Begin.ps1 -TearDown      # Destroy VMs, clear progress, keep media
+.\Begin.ps1 -SkipValidation # Rebuild all VMs from cached media
 ```
 
 ### `-RemoveSwitch`
@@ -194,7 +194,7 @@ Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -All
 Then reboot and re-run the script.
 
 #### 2. "Run from an elevated PowerShell session"
-**Solution**: Right-click PowerShell â†’ "Run as Administrator"
+**Solution**: Right-click PowerShell → "Run as Administrator"
 
 #### 3. DNS Zone Creation Failed
 **Cause**: AD DS still initializing after DC promotion  
@@ -204,7 +204,7 @@ Then reboot and re-run the script.
 Get-VM -Name DC1 | Select-Object State, Heartbeat
 
 # Re-run script to complete DNS setup
-.\1.0.2.ps1 -LabRoot E:\HyperV
+.\Begin.ps1 -LabRoot E:\HyperV
 ```
 
 #### 4. DHCP Authorization Failed
@@ -217,7 +217,7 @@ Invoke-Command -VMName DC1 -Credential (Get-Credential) -ScriptBlock {
 }
 
 # Re-run script to complete DHCP setup
-.\1.0.2.ps1 -LabRoot E:\HyperV
+.\Begin.ps1 -LabRoot E:\HyperV
 ```
 
 #### 5. VM Stuck at "Please wait for the Group Policy Client"
@@ -289,10 +289,10 @@ Remove-LabOrphanedVM -VMName 'OrphanedVM' -VMsRoot 'E:\HyperV\VMs'
 ### Rebuild from Scratch (Complete Fresh Start)
 ```powershell
 # Destroy everything
-.\1.0.2.ps1 -TearDown -RemoveSwitch
+.\Begin.ps1 -TearDown -RemoveSwitch
 
 # Rebuild
-.\1.0.2.ps1 -LabRoot E:\HyperV
+.\Begin.ps1 -LabRoot E:\HyperV
 ```
 
 ### Add More VMs to Existing Lab
@@ -408,14 +408,14 @@ For issues or questions:
 - Better error handling for AD DS synchronization delays
 - Automatic retry for DNS and DHCP operations during AD DS initialization
 
-### Gen1.0.1 (Intermediate Release)
+### 1.0.1 (Intermediate Release)
 - Array normalization fixes for single-item JSON arrays
 - PSObject property access improvements for strict mode compatibility
 - Duplicate Mount-VHD removal to fix file lock issues
 - Get-VHD cleanup code to dismount orphaned VHDs before media scan
 - MediaSource.Type and Generation property access protection
 
-### Gen1.0.0 (Initial Release)
+### 1.0.0 (Initial Release)
 - Full Hyper-V Active Directory lab deployment automation
 - Interactive configuration wizard
 - Domain controller promotion with idempotency support

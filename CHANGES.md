@@ -1,4 +1,4 @@
-# Changes Applied to V2.6.ps1
+# Changes Applied to Begin.ps1
 
 ## Summary
 This document describes the fixes and improvements applied to address the issues reported by the user.
@@ -95,6 +95,26 @@ $vCpu = if ($LabConfig.PSObject.Properties['VMVCpuCount']) { $LabConfig.VMVCpuCo
 $memStartup = if ($LabConfig.PSObject.Properties['VMMemoryStartupGB']) { $LabConfig.VMMemoryStartupGB } else { 4 }
 $memMax = if ($LabConfig.PSObject.Properties['VMMemoryMaxGB']) { $LabConfig.VMMemoryMaxGB } else { 8 }
 ```
+
+---
+
+### 4. Script Renaming (Begin.ps1) ✅
+**Problem**: The main script was previously named `1.0.2.ps1` or referenced under different names in documentation.
+
+**Solution**: All references to the old script name have been updated to `Begin.ps1`.
+
+**Files Updated**:
+- README.md - All command examples now use `.\Begin.ps1`
+- CHANGES.md - This file now references Begin.ps1
+- Instructions.ps1 - HTML generation script updated
+- PDF-README.txt - All references updated
+
+---
+
+## Code Locations (from 1.0.2.ps1)
+
+**Code Location**: Lines 2320-2360 in 1.0.2.ps1  
+**Code Location**: Lines 1208-1213 in 1.0.2.ps1
 
 ---
 

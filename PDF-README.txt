@@ -48,20 +48,20 @@ QUICK START GUIDE:
 ================================================================================
 
 1. First Run:
-   .\Gen1.0.2.ps1 -LabRoot E:\HyperV
+   .\Begin.ps1 -LabRoot E:\HyperV
 
 2. Subsequent Runs:
-   .\Gen1.0.2.ps1 -LabRoot E:\HyperV
+   .\Begin.ps1 -LabRoot E:\HyperV
 
 3. Resume Interrupted Deployment:
-   .\Gen1.0.2.ps1 -LabRoot E:\HyperV
+   .\Begin.ps1 -LabRoot E:\HyperV
 
 4. Skip Validation (Faster):
-   .\Gen1.0.2.ps1 -LabRoot E:\HyperV -SkipValidation
+   .\Begin.ps1 -LabRoot E:\HyperV -SkipValidation
 
 5. Rebuild from Scratch:
-   .\Gen1.0.2.ps1 -TearDown -RemoveSwitch
-   .\Gen1.0.2.ps1 -LabRoot E:\HyperV
+   .\Begin.ps1 -TearDown -RemoveSwitch
+   .\Begin.ps1 -LabRoot E:\HyperV
 
 ================================================================================
 PARAMETERS SUMMARY:

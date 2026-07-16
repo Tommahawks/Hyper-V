@@ -495,6 +495,6 @@ For issues or questions:
 
 ---
 
-**Last Updated**: 2026-07-08  
+**Last Updated**: 2026-07-16  
 **Script Version**: 1.0.2
 

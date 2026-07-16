@@ -104,53 +104,7 @@ No explicit `$Version` variable or comment-based version is found in the script 
 
 ### Issues Found
 
-#### 1. Indentation Issue in DHCP Script (Line 65)
-**File**: `E:\HyperV\Scripts\07-Install-DhcpServer.ps1` and master template at line ~2034  
-**Function**: `Install-LabDhcpServer`  
-**Issue**: The `while` loop inside the AD authorization section has incorrect indentation. The loop starts with `while ($retryCount -lt $maxRetries)` instead of being indented as a child of the ScriptBlock.
-
-**Before**:
-```powershell
-            # Retry authorization with AD DS initialization detection
-            $maxRetries = 10
-            $retryCount = 0
-        while ($retryCount -lt $maxRetries) {
-```
-
-**After Fix**:
-```powershell
-            # Retry authorization with AD DS initialization detection
-            $maxRetries = 10
-            $retryCount = 0
-            while ($retryCount -lt $maxRetries) {
-```
-
-**Impact**: This is a syntax/reading issue but PowerShell may still execute it correctly due to its flexible parsing. However, it violates coding standards and could confuse future maintainers.
-
-#### 2. Missing Version Tracking
-**File**: `Begin.ps1`  
-**Issue**: No explicit version variable or comment-based version information is embedded in the script itself. The version is only implied by the filename.
-
-**Recommendation**: Add a `$Script:Version = "1.0.2"` variable at the top of the script for programmatic version checking and logging.
-
-#### 3. Large Backup File
-**File**: `backup.donottouch` (214KB)  
-**Issue**: A file named `backup.donottouch` exists with no clear purpose or documentation. The name suggests it should not be modified, but its contents and origin are unknown.
-
-**Recommendation**: Investigate the source of this file or remove it if unnecessary.
-
-### No Critical Issues
-
-- **Enhanced Error Reporting**: The script includes `Get-DetailedErrorMessage` function that provides comprehensive diagnostics including exception type, error category, line number, code context, and stack trace when failures occur
-- **Automatic Error Log Export**: When deployment fails, an error report is automatically exported to `[LabRoot]\Logs\Error_yyyyMMdd_HHmmss.txt` (default: `C:\HyperV-Lab\Logs`) with full system information for troubleshooting. The path depends on the `-LabRoot` parameter value.
-- **Automatic DNS Configuration Before Domain Join**: Script sets DNS server to the first DC's IP (not gateway) before domain join attempt, ensuring VM can resolve domain even without DHCP lease. DC IPs are typically at `.10`, `.11`, etc.
-- **Existing Environment Support**: Script detects and fixes DNS misconfigurations on existing VMs that were created with incorrect DNS settings
-- **DNS Configuration Verification**: After domain join (post-restart), VMs are verified and DNS settings are automatically corrected to point to domain controllers by resolving the domain name and comparing with configured DNS servers
-- **Workgroup Mode DNS**: In workgroup mode, a standalone DNS server is installed on the first additional VM with forwarders for internet access (Google 8.8.8.8, Cloudflare 1.1.1.1)
-- PowerShell 5.1 compatibility is maintained (no modern features like null-coalescing)
-- Idempotency is properly implemented via step tracking
-- Child scripts are generated from here-strings in the master script for easy distribution
-- Media caching prevents redundant downloads/conversions
+- Current deployment appears to cause LabSwitch has no network.
 
 ### Recent Changes Applied (from conversation summary)
 
@@ -169,6 +123,5 @@ These changes enable DHCP server installation on non-domain-joined VMs.
 ## Future Enhancements
 
 Potential future improvements:
-- Fix ISO-to-VHDX conversion to work reliably on Windows 11 hosts with Secure Boot enabled
-- Use descriptive names (e.g., Server2019.vhdx) instead of random GUIDs for generated VHDX files from ISO conversion
+- Shows IP address of each VM after deployment for easier access
 

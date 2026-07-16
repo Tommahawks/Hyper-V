@@ -196,7 +196,7 @@ c:\Users\TomCore\Downloads\HPV\Instructions.ps1
 <ul>
 <li><strong>Number of DCs</strong>: 1 or more</li>
 <li><strong>IP Addresses</strong>: Static IPs for each DC</li>
-<li><strong>OS Edition</strong>: Server2016, Server2022, or Server2025</li>
+<li><strong>OS Edition</strong>: Server2016, Server2019, Server2022, or Server2025</li>
 </ul>
 <h3>Additional VMs</h3>
 <ul>

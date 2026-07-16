@@ -1,4 +1,4 @@
-﻿# Hyper-V Automation Lab Deploy - 1.0.2
+﻿# Hyper-V Automation Lab Deploy
 
 ## Overview
 
@@ -32,11 +32,81 @@ This script automates the creation of a complete Hyper-V Active Directory lab en
 
 ## Quick Start
 
-### 1.0.2 Improvements
+### Key Features
 - **Intelligent File Format Selection**: Automatically uses `.vhd` for Server 2016/2019/2022 (Generation 1) and `.vhdx` for Server 2025+ (Generation 2)
+- **Cached Media Priority**: Prefers existing VHD/VHDX files over ISO downloads when available
 - **OSKey Inference Fallback**: Determines Windows version from filename patterns when edition reading fails (e.g., "Access is denied" errors)
 - **Automatic Generation Correction**: Fixes incorrect generation values in saved configurations
 - **Better Error Handling**: Improved handling of media access issues and strict mode compatibility
+
+### Enhanced Error Reporting
+When an error occurs, the script provides detailed diagnostic information including:
+- Full exception message and type
+- Error category, activity, reason, and target name
+- Line number and code context where the error occurred
+- Stack trace for debugging
+- Context-specific information (e.g., which VM or step failed)
+
+This helps quickly identify the root cause of failures without needing to manually debug.
+
+### DNS Configuration Verification
+After a VM joins the domain, the script automatically verifies and corrects DNS settings:
+- Checks if DNS is set to automatic (DHCP) or static
+- Verifies DNS servers point to domain controllers by resolving the domain name
+- Automatically fixes DNS configuration if incorrect
+
+This ensures proper domain resolution even if DHCP options weren't applied correctly. The verification runs after the VM restarts following domain join, ensuring it can properly resolve domain controllers.
+
+### Network Configuration
+
+The script creates an isolated lab network with the following default addressing:
+
+| Component | Default Address | Notes |
+|-----------|-----------------|-------|
+| Subnet | `192.168.50.0/24` | User-configurable via wizard |
+| Gateway / Host | `.1` | User-configurable, defaults to first IP in subnet |
+| Domain Controller 1 | `.10` | Hardcoded sequential assignment |
+| Domain Controller 2+ | `.11`, `.12`, etc. | Sequential based on DC count |
+| DHCP Scope Start | `.100` | User-configurable |
+| DHCP Scope End | `.200` | User-configurable |
+
+**Important Notes:**
+- **DC IPs are fixed at `.10`, `.11`, etc.** regardless of gateway setting
+- The DNS server for domain-joined VMs is set to the first DC's IP (`.10`)
+- DHCP provides IP addresses, gateway, and DNS to member VMs via Option 006
+
+### Automatic DNS Configuration Before Domain Join
+Before attempting to join a VM to the domain, the script automatically sets the DNS server to point to the first domain controller. This ensures:
+- The VM can resolve the domain name even if DHCP hasn't been applied yet
+- Domain join succeeds without waiting for DHCP lease
+- Proper DNS configuration is maintained after restart
+
+**Note**: The script uses the DC's IP address (typically `.10`, `.11`, etc.) as the DNS server, not the gateway (`.1`), to ensure proper domain resolution.
+
+### Existing Environment Support
+The script can detect and fix DNS misconfigurations on existing VMs that were created with incorrect DNS settings. It:
+1. Sets DNS to the gateway/DC IP before domain join (if not already configured)
+2. Verifies DNS points to domain controllers after restart
+3. Automatically corrects any misconfigured DNS settings
+
+### Error Log Files
+When a deployment fails, an error report is automatically exported to:
+```
+[LabRoot]\Logs\Error_yyyyMMdd_HHmmss.txt
+```
+
+Where `[LabRoot]` is the path specified by the `-LabRoot` parameter (default: `C:\HyperV-Lab`). For example:
+- Default: `C:\HyperV-Lab\Logs\Error_yyyyMMdd_HHmmss.txt`
+- Custom (`-LabRoot E:\HyperV`): `E:\HyperV\Logs\Error_yyyyMMdd_HHmmss.txt`
+
+
+
+The log file includes:
+- Full error details from `Get-DetailedErrorMessage`
+- System information (OS version, PowerShell version, Hyper-V status)
+- Timestamp and LabRoot path
+
+This file is displayed on screen when an error occurs and should be shared when seeking help.
 
 ### First Run (Interactive Wizard)
 
@@ -78,9 +148,12 @@ The root folder for all lab resources. This directory will contain:
 - `Scripts\` - Generated PowerShell scripts
 - `Modules\` - PowerShell modules
 - `Config\` - Lab configuration (LabConfig.json)
-- `Media\` - Downloaded ISOs and cached VHDX files
+- `Media\ISO\` - Downloaded Windows ISO files
+- `Media\VHDX\` - Cached VHDX/VHD golden images (preferred over ISO downloads)
 - `VMs\` - Virtual machine files
 - `Logs\` - Deployment logs
+
+**Note**: When both ISO and VHD/VHDX files exist for the same Windows edition, the script prioritizes using the cached VHD/VHDX files for faster VM deployment.
 
 **Example**:
 ```powershell
@@ -162,7 +235,7 @@ Powers on stopped VMs during validation to probe roles live via PowerShell Direc
 ### Domain Controllers
 - **Number of DCs**: 1 or more
 - **IP Addresses**: Static IPs for each DC
-- **OS Edition**: Server2016, Server2022, or Server2025
+- **OS Edition**: Server2016, Server2019, Server2022, or Server2025
 
 ### Additional VMs
 - **Number of VMs**: 0 or more
@@ -171,16 +244,13 @@ Powers on stopped VMs during validation to probe roles live via PowerShell Direc
 
 ## Media Sources
 
-### Automatic (No Registration)
-- Windows 10 Pro
-- Windows 11 Pro
-
-### Manual Registration Required
-Windows 10/11 Enterprise and Windows Server editions require a one-time registration at Microsoft Evaluation Center:
+All Windows editions (including Windows 10/11 Pro and Enterprise, plus Windows Server) require a one-time registration at Microsoft Evaluation Center:
 
 1. After first run, check `Config\MediaSources.psd1`
 2. Follow the instructions in that file
 3. Update the fwlink URLs with your registered links
+
+**Note**: The script will automatically detect which editions need registration and guide you through the process.
 
 ## Troubleshooting
 

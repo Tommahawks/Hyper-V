@@ -50,8 +50,8 @@
     choices are PRESERVED, so cached ISO/VHDX media is reused and nothing is
     re-downloaded. Combine with -RemoveSwitch to also tear down the vSwitch
     and NAT. The intended fast-fresh flow is:
-        .\1.0.2.ps1 -TearDown      # destroy VMs, clear progress, keep media
-        .\1.0.2.ps1 -SkipValidation # rebuild all VMs from cached media
+        .\Begin.ps1 -TearDown      # destroy VMs, clear progress, keep media
+        .\Begin.ps1 -SkipValidation # rebuild all VMs from cached media
     No Administrator password is needed (tearing a VM down needs no guest
     credentials).
 
@@ -73,8 +73,8 @@
     Requires an elevated PowerShell session on a Windows host with the
     Hyper-V role/feature already enabled, and a working internet connection
     for the first run of any given OS edition (downloads are cached after
-    that). Windows 10/11 Enterprise and Windows Server media require a
-    one-time manual step - see Config\MediaSources.psd1 after first run.
+    that). All Windows editions require a one-time manual registration at
+    Microsoft Evaluation Center - see Config\MediaSources.psd1 after first run.
 #>
 
 [CmdletBinding()]
@@ -877,12 +877,9 @@ function New-LabSwitch {
     Resolves, downloads, and converts Windows installation media into a cached,
     reusable "golden" VHDX per OS edition.
 .DESCRIPTION
-    - Windows 10/11 Home/Pro: fully automatic via the open-source Fido tool (no
-      registration gate - Microsoft publishes these retail ISO links openly).
-    - Windows 10/11 Enterprise and Windows Server 2016/2022/2025: Microsoft only
-      offers these behind the Evaluation Center's one-time registration form, so
-      the resulting fwlink URL must be supplied in Config\MediaSources.psd1. See
-      that file for exact instructions.
+    All Windows editions (including Home, Pro, Enterprise, and Server) require a
+    one-time registration at Microsoft Evaluation Center. The resulting fwlink URL
+    must be supplied in Config\MediaSources.psd1. See that file for exact instructions.
     Golden VHDX files are cached and reused across every VM that requests the same
     OS - only the first VM of a given edition pays the download/convert cost.
 #>
@@ -904,7 +901,7 @@ function Resolve-LabIsoEdition {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [string] $IsoPath,
-        [Parameter(Mandatory)] [ValidateSet('Win10Pro', 'Win11Pro', 'Win10Enterprise', 'Win11Enterprise', 'Server2016', 'Server2022', 'Server2025')]
+        [Parameter(Mandatory)] [ValidateSet('Win10Pro', 'Win11Pro', 'Win10Enterprise', 'Win11Enterprise', 'Server2016', 'Server2019', 'Server2022', 'Server2025')]
         [string] $OSKey,
         [switch] $PreferServerCore
     )
@@ -958,7 +955,7 @@ function Get-WindowsMedia {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
-        [ValidateSet('Win10Pro', 'Win11Pro', 'Win10Enterprise', 'Win11Enterprise', 'Server2016', 'Server2022', 'Server2025')]
+        [ValidateSet('Win10Pro', 'Win11Pro', 'Win10Enterprise', 'Win11Enterprise', 'Server2016', 'Server2019', 'Server2022', 'Server2025')]
         [string] $OSKey,
 
         [Parameter(Mandatory)] [string] $MediaRoot,
@@ -984,9 +981,43 @@ function Get-WindowsMedia {
     $toolsRoot = Join-Path $MediaRoot 'Tools'
     $isoRoot = Join-Path $MediaRoot 'ISO'
     $vhdxRoot = Join-Path $MediaRoot 'VHDX'
-    $vhdxPath = Join-Path $vhdxRoot "$OSKey.vhdx"
+    
+    # Determine disk layout based on OS version
+    # Older Windows Server versions (2016/2019/2022) use BIOS layout to avoid bcdboot.exe error 193
+    # Newer versions (2025+) use UEFI layout
+    # NOTE: This mapping is based on testing with specific ISOs on this host configuration.
+    # Future ISO updates or different hosts may not need this distinction.
+    $useBIOSLayout = @('Server2016', 'Server2019', 'Server2022') -contains $OSKey
+    
+    # Build output path dynamically based on chosen layout
+    if ($LocalIsoPath -and (Test-Path $LocalIsoPath)) {
+        $isoBaseName = [System.IO.Path]::GetFileNameWithoutExtension($LocalIsoPath)
+        $outputExt = if ($useBIOSLayout) { '.vhd' } else { '.vhdx' }
+        $vhdxPath = Join-Path $vhdxRoot "$isoBaseName$outputExt"
+    } else {
+        $outputExt = if ($useBIOSLayout) { '.vhd' } else { '.vhdx' }
+        $vhdxPath = Join-Path $vhdxRoot "$OSKey$outputExt"
+    }
     foreach ($p in @($toolsRoot, $isoRoot, $vhdxRoot)) {
         if (-not (Test-Path $p)) { New-Item -Path $p -ItemType Directory -Force | Out-Null }
+    }
+
+    # Ensure Convert-WindowsImage is available
+    $convertToolPath = Join-Path $toolsRoot 'Convert-WindowsImage.ps1'
+    if (-not (Get-Command Convert-WindowsImage -ErrorAction SilentlyContinue)) {
+        if (Test-Path $convertToolPath) {
+            . $convertToolPath
+        } else {
+            # Try to download it automatically
+            Write-LabLog "Downloading Convert-WindowsImage.ps1..." -Level Info
+            try {
+                $webClient = New-Object System.Net.WebClient
+                $webClient.DownloadFile('https://raw.githubusercontent.com/MicrosoftDocs/Virtualization-Documentation/main/hyperv-tools/Convert-WindowsImage/Convert-WindowsImage.ps1', $convertToolPath)
+                . $convertToolPath
+            } catch {
+                Write-LabLog "Failed to download Convert-WindowsImage.ps1: $_" -Level Warn
+            }
+        }
     }
 
     $mediaSources = Import-PowerShellDataFile -Path $MediaSourcesPath
@@ -1064,7 +1095,7 @@ function Get-WindowsMedia {
         }
         
         # Try to match by OSKey (case-insensitive) using the naming convention
-        $matchedVhdx = @(@($allVhdx | Where-Object { 
+        $matchedVhdx = @(@($allMedia | Where-Object { 
             $vhdxBase = $_.BaseName
             $vhdxExt = $_.Extension.ToLower()
             foreach ($pattern in $vhdxNamePatterns) {
@@ -1097,26 +1128,63 @@ function Get-WindowsMedia {
         } elseif (@($matchedVhdx).Count -eq 1) {
             $cachedVhdx = @($matchedVhdx)[0]
         } else {
-            # No match found, check if we have any VHDX/VHD files
-            if ($allMedia.Count -gt 0) {
-                # If multiple files exist, prompt user to select
-                if ($allMedia.Count -gt 1) {
-                    Write-LabLog "WARNING: No VHDX/VHD matched OSKey '$OSKey'. Available files:" -Level Info
-                    $i = 1
-                    foreach ($media in $allMedia) {
-                        Write-LabLog "  [$i] $($media.Name)" -Level Info
-                        $i++
-                    }
-                    $selection = Read-Host "Select file for $OSKey (1-$(@($allMedia).Count))"
-                    if ($selection -match '^\d+$' -and [int]$selection -ge 1 -and [int]$selection -le @($allMedia).Count) {
-                        $cachedVhdx = @($allMedia)[[int]$selection - 1]
-                    } else {
-                        $cachedVhdx = @($allMedia)[0]  # Default to first if invalid input
-                    }
+            # No match found, check if we have any VHDX/VHD files or ISO files
+            $isoRoot = Join-Path $MediaRoot 'ISO'
+            $allIso = @()
+            if (Test-Path $isoRoot) {
+                $allIso = @() + (Get-ChildItem -Path $isoRoot -Filter "*.iso" -File -ErrorAction SilentlyContinue)
+            }
+            
+            # Combine VHDX/VHD and ISO files for selection
+            $allAvailableMedia = $allMedia + $allIso
+            
+            if ($allAvailableMedia.Count -gt 0) {
+                # If a specific file was pre-selected via MediaSource, use it directly without prompting
+                if ($LocalVhdxPath) {
+                    $fileName = Split-Path $LocalVhdxPath -Leaf
+                    Write-LabLog "Using pre-selected file for ${OSKey}: ${fileName}" -Level Info
+                    $cachedVhdx = Get-Item $LocalVhdxPath
                 } else {
-                    # Only one file, use it with warning
-                    Write-LabLog "WARNING: No VHDX/VHD matched OSKey '$OSKey'. Using available file: $($allMedia[0].Name)" -Level Info
-                    $cachedVhdx = @($allMedia)[0]
+                    # No pre-selection, prompt user to select from all available files (VHDX/VHD/ISO)
+                    if ($allAvailableMedia.Count -gt 1) {
+                        Write-LabLog "WARNING: No VHDX/VHD matched OSKey '$OSKey'. Available files:" -Level Info
+                        $i = 1
+                        foreach ($media in $allAvailableMedia) {
+                            $kind = if ($media.Extension -eq '.iso') { 'ISO' } else { "$($media.Extension.TrimStart('.').ToUpper())" }
+                            Write-LabLog "  [$i] ${kind}: $($media.Name)" -Level Info
+                            $i++
+                        }
+                        $selection = Read-Host "Select file for $OSKey (1-$(@($allAvailableMedia).Count))"
+                        if ($selection -match '^\d+$' -and [int]$selection -ge 1 -and [int]$selection -le @($allAvailableMedia).Count) {
+                            $selected = @($allAvailableMedia)[[int]$selection - 1]
+                            # If ISO, we'll use it directly; if VHDX/VHD, continue with existing logic
+                            if ($selected.Extension -eq '.iso') {
+                                Write-LabLog "Selected ISO file: $($selected.FullName)" -Level Info
+                                $cachedIso = $selected
+                            } else {
+                                $cachedVhdx = $selected
+                            }
+                        } else {
+                            # Default to first available file
+                            $selected = @($allAvailableMedia)[0]
+                            if ($selected.Extension -eq '.iso') {
+                                Write-LabLog "Selected ISO file: $($selected.FullName)" -Level Info
+                                $cachedIso = $selected
+                            } else {
+                                $cachedVhdx = $selected
+                            }
+                        }
+                    } else {
+                        # Only one file, use it with warning
+                        $media = @($allAvailableMedia)[0]
+                        $kind = if ($media.Extension -eq '.iso') { 'ISO' } else { "$($media.Extension.TrimStart('.').ToUpper())" }
+                        Write-LabLog "WARNING: No VHDX/VHD matched OSKey '$OSKey'. Using available file: ${kind} - $($media.Name)" -Level Info
+                        if ($media.Extension -eq '.iso') {
+                            $cachedIso = $media
+                        } else {
+                            $cachedVhdx = $media
+                        }
+                    }
                 }
             }
         }
@@ -1126,18 +1194,101 @@ function Get-WindowsMedia {
         Write-LabLog "Using cached golden image for $OSKey - $($cachedVhdx.FullName)" -Level Info
         # Check if this is a VHD file and we're using Gen 1
         $ext = [System.IO.Path]::GetExtension($cachedVhdx.FullName).ToLower()
-        if ($Generation -eq 1 -and $ext -eq '.vhd') {
-            return [pscustomobject]@{ OSKey = $OSKey; VhdPath = $cachedVhdx.FullName; MediaSource = 'CachedVhd' }
+        
+        # Determine the correct destination path based on generation requirement
+        if ($Generation -eq 1) {
+            $destPath = Join-Path $vhdxRoot "$($cachedVhdx.BaseName).vhd"
         } else {
-            # Determine destination path
             $destPath = Join-Path $vhdxRoot "$($cachedVhdx.BaseName).vhdx"
+        }
+        
+        # Check if conversion is needed
+        if ($Generation -eq 1 -and $ext -eq '.vhd') {
+            # Gen1 + VHD: use as-is
+            return [pscustomobject]@{ OSKey = $OSKey; VhdPath = $cachedVhdx.FullName; MediaSource = 'CachedVhd' }
+        } elseif ($Generation -eq 2 -and $ext -eq '.vhdx') {
+            # Gen2 + VHDX: use as-is
+            return [pscustomobject]@{ OSKey = $OSKey; VhdxPath = $cachedVhdx.FullName; MediaSource = 'CachedVhdx' }
+        } else {
+            # Conversion needed: VHD->VHDX (Gen2) or VHDX->VHD (Gen1)
+            Write-LabLog "Converting $($ext.ToUpper()) to $([System.IO.Path]::GetExtension($destPath).ToUpper()) for Generation $Generation..." -Level Step
             
             # Only copy if source and destination are different
             if ($cachedVhdx.FullName -ne $destPath) {
+                Convert-Vhd -Path $cachedVhdx.FullName -DestinationPath $destPath -Force -ErrorAction Stop
+            } else {
+                # Same file but need to rename extension (same format, just wrong extension)
                 Copy-Item -Path $cachedVhdx.FullName -Destination $destPath -Force
             }
             
-            return [pscustomobject]@{ OSKey = $OSKey; VhdxPath = $destPath; MediaSource = 'CachedVhdx' }
+            # Return correct property based on generation
+            if ($Generation -eq 1) {
+                return [pscustomobject]@{ OSKey = $OSKey; VhdPath = $destPath; MediaSource = 'CachedVhd' }
+            } else {
+                return [pscustomobject]@{ OSKey = $OSKey; VhdxPath = $destPath; MediaSource = 'CachedVhdx' }
+            }
+        }
+    }
+    
+    # Handle cached ISO if selected
+    if ($cachedIso) {
+        Write-LabLog "Using cached ISO for $OSKey - $($cachedIso.FullName)" -Level Info
+        $isoPath = $cachedIso.FullName
+        $mediaSourceLabel = 'CachedIso'
+        
+        # Check if Convert-WindowsImage is available (it should have been auto-downloaded above)
+        if (-not (Get-Command Convert-WindowsImage -ErrorAction SilentlyContinue)) {
+            Write-LabLog "WARNING: Convert-WindowsImage cmdlet not found. ISO files require this tool to convert to VHDX." -Level Warn
+            Write-LabLog "To use ISO files, you need to install the Windows ADK or download Convert-WindowsImage.ps1:" -Level Info
+            Write-LabLog "  - Windows ADK: https://learn.microsoft.com/en-us/windows-hardware/get-started/adk-install" -Level Info
+            Write-LabLog "  - Or run this script again to attempt automatic download" -Level Info
+            throw "Convert-WindowsImage cmdlet is required to use ISO files as media source."
+        }
+        
+        Write-LabLog "Inspecting $isoPath to select the right edition..." -Level Step
+        $editionName = Resolve-LabIsoEdition -IsoPath $isoPath -OSKey $OSKey -PreferServerCore:$PreferServerCore
+        Write-LabLog "Selected edition: $editionName" -Level Info
+
+        if ($VhdSizeBytes -eq 0) {
+            $VhdSizeBytes = if ($OSKey -like 'Server*') { 100GB } else { 80GB }
+        }
+
+        if (Test-Path $vhdxPath) { Remove-Item -Path $vhdxPath -Force }
+
+        # Determine disk layout and format based on OS version
+        $diskLayout = if ($useBIOSLayout) { 'BIOS' } else { 'UEFI' }
+        $vhdFormat = if ($useBIOSLayout) { 'VHD' } else { 'VHDX' }
+        
+        Write-LabLog "Converting ISO to a $($VhdSizeBytes / 1GB)GB dynamic $vhdFormat (golden image, will be copied per-VM)..." -Level Step
+        
+        # Use BIOS layout for older Windows Server versions (2016/2019/2022) to avoid bcdboot.exe error 193
+        # Newer versions (2025+) use UEFI layout
+        Convert-WindowsImage -SourcePath $isoPath -Edition $editionName -VHDPath $vhdxPath -VHDFormat $vhdFormat -SizeBytes $VhdSizeBytes -DiskLayout $diskLayout -ErrorAction Stop | Out-Null
+        
+        # Check if the conversion actually succeeded by verifying the output file exists
+        if (-not (Test-Path $vhdxPath)) {
+            # Try to detect bcdboot.exe error 193 specifically
+            $tempLogs = Join-Path $env:TEMP 'Convert-WindowsImage'
+            if (Test-Path $tempLogs) {
+                $latestLog = Get-ChildItem -Path $tempLogs -Directory | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+                if ($latestLog) {
+                    $logContent = Get-Content -Path (Join-Path $latestLog 'Convert-WindowsImage.log') -ErrorAction SilentlyContinue | Out-String
+                    if ($logContent -match 'bcdboot.*failed|ERROR.*193') {
+                        Write-LabLog "bcdboot.exe failed with error 193 (known issue on Windows 11 24H2+ with Secure Boot)" -Level Warn
+                        Write-LabLog "This happens when converting older ISOs on hosts with Secure Boot enabled" -Level Info
+                        Write-LabLog "Workaround: Temporarily disable Secure Boot in host UEFI firmware before running conversion, then re-enable." -Level Info
+                    }
+                }
+            }
+            throw "Convert-WindowsImage reported success but $vhdxPath was not created. Check the Convert-WindowsImage transcript in %TEMP% for details."
+        }
+        
+        # Return correct property based on file format (VHD vs VHDX)
+        Write-LabLog "Golden image ready for $OSKey - $vhdxPath" -Level Success
+        if ($useBIOSLayout) {
+            return [pscustomobject]@{ OSKey = $OSKey; VhdPath = $vhdxPath; MediaSource = $mediaSourceLabel }
+        } else {
+            return [pscustomobject]@{ OSKey = $OSKey; VhdxPath = $vhdxPath; MediaSource = $mediaSourceLabel }
         }
     }
     
@@ -1148,8 +1299,12 @@ function Get-WindowsMedia {
         Write-LabLog "Using provided local ISO: $LocalIsoPath" -Level Step
         $isoPath = $LocalIsoPath
         $mediaSourceLabel = 'LocalIso'
+        
+        # Use ISO filename (without extension) as VHDX name when converting from ISO
+        $isoBaseName = [System.IO.Path]::GetFileNameWithoutExtension($isoPath)
+        $vhdxPath = Join-Path $vhdxRoot "$isoBaseName.vhdx"
     } else {
-        throw "No cached VHDX or ISO found for $OSKey. Please provide a pre-downloaded ISO file using -LocalIsoPath parameter, or place a cached VHDX/VHD file in the Media folder."
+        throw "No cached VHDX found for $OSKey. Please place a cached VHDX/VHD file in the Media folder, or install Convert-WindowsImage to use ISO files."
     }
 
     Write-LabLog "Inspecting $isoPath to select the right edition..." -Level Step
@@ -1164,23 +1319,38 @@ function Get-WindowsMedia {
 
     if (Test-Path $vhdxPath) { Remove-Item -Path $vhdxPath -Force }
 
-    Write-LabLog "Converting ISO to a $($VhdSizeBytes / 1GB)GB dynamic VHDX (golden image, will be copied per-VM)..." -Level Step
-    Convert-WindowsImage -SourcePath $isoPath -Edition $editionName -VHDPath $vhdxPath -VHDFormat VHDX -SizeBytes $VhdSizeBytes -DiskLayout UEFI -ErrorAction Stop | Out-Null
-
+    # Determine disk layout and format based on OS version
+    $diskLayout = if ($useBIOSLayout) { 'BIOS' } else { 'UEFI' }
+    $vhdFormat = if ($useBIOSLayout) { 'VHD' } else { 'VHDX' }
+    
+    Write-LabLog "Converting ISO to a $($VhdSizeBytes / 1GB)GB dynamic $vhdFormat (golden image, will be copied per-VM)..." -Level Step
+    
+    # Use BIOS layout for older Windows Server versions (2016/2019/2022) to avoid bcdboot.exe error 193
+    # Newer versions (2025+) use UEFI layout
+    Convert-WindowsImage -SourcePath $isoPath -Edition $editionName -VHDPath $vhdxPath -VHDFormat $vhdFormat -SizeBytes $VhdSizeBytes -DiskLayout $diskLayout -ErrorAction Stop | Out-Null
+    
+    # Check if the conversion actually succeeded by verifying the output file exists
     if (-not (Test-Path $vhdxPath)) {
+        # Try to detect bcdboot.exe error 193 specifically
+        $tempLogs = Join-Path $env:TEMP 'Convert-WindowsImage'
+        if (Test-Path $tempLogs) {
+            $latestLog = Get-ChildItem -Path $tempLogs -Directory | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            if ($latestLog) {
+                $logContent = Get-Content -Path (Join-Path $latestLog 'Convert-WindowsImage.log') -ErrorAction SilentlyContinue | Out-String
+                if ($logContent -match 'bcdboot.*failed|ERROR.*193') {
+                    Write-LabLog "bcdboot.exe failed with error 193 (known issue on Windows 11 24H2+ with Secure Boot)" -Level Warn
+                    Write-LabLog "This happens when converting older ISOs on hosts with Secure Boot enabled" -Level Info
+                    Write-LabLog "Workaround: Temporarily disable Secure Boot in host UEFI firmware before running conversion, then re-enable." -Level Info
+                }
+            }
+        }
         throw "Convert-WindowsImage reported success but $vhdxPath was not created. Check the Convert-WindowsImage transcript in %TEMP% for details."
     }
 
-    # Determine final path based on generation
-    $finalPath = if ($Generation -eq 1) {
-        Join-Path $vhdxRoot "$OSKey.vhd"
-    } else {
-        $vhdxPath
-    }
-    
-    Write-LabLog "Golden image ready for $OSKey - $finalPath" -Level Success
-    if ($Generation -eq 1) {
-        return [pscustomobject]@{ OSKey = $OSKey; VhdPath = $finalPath; MediaSource = $mediaSourceLabel }
+    # Return correct property based on file format (VHD vs VHDX)
+    Write-LabLog "Golden image ready for $OSKey - $vhdxPath" -Level Success
+    if ($useBIOSLayout) {
+        return [pscustomobject]@{ OSKey = $OSKey; VhdPath = $vhdxPath; MediaSource = $mediaSourceLabel }
     } else {
         return [pscustomobject]@{ OSKey = $OSKey; VhdxPath = $vhdxPath; MediaSource = $mediaSourceLabel }
     }
@@ -1278,18 +1448,19 @@ function New-LabUnattendXml {
 "@
 }
 
-function Set-LabVhdxUnattend {
+function Set-LabDiskUnattend {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)] [string] $VhdxPath,
+        [Parameter(Mandatory)] [string] $DiskPath,
         [Parameter(Mandatory)] [string] $UnattendXmlContent
     )
-    Write-LabLog "Mounting $VhdxPath to inject unattend.xml..." -Level Info
-    $disk = Mount-VHD -Path $VhdxPath -Passthru -ErrorAction Stop | Get-Disk
+    Write-LabLog "Mounting $DiskPath to inject unattend.xml..." -Level Info
+    # Mount-VHD works for both .vhd and .vhdx files
+    $disk = Mount-VHD -Path $DiskPath -Passthru -ErrorAction Stop | Get-Disk
     try {
         $osPartition = $disk | Get-Partition | Where-Object { $_.DriveLetter -and $_.Size -gt 5GB } | Select-Object -First 1
         if (-not $osPartition) {
-            throw "Could not locate the Windows OS partition inside $VhdxPath after mounting."
+            throw "Could not locate the Windows OS partition inside $DiskPath after mounting."
         }
         $pantherDir = "$($osPartition.DriveLetter):\Windows\Panther"
         if (-not (Test-Path $pantherDir)) { New-Item -Path $pantherDir -ItemType Directory -Force | Out-Null }
@@ -1297,7 +1468,7 @@ function Set-LabVhdxUnattend {
         Set-Content -Path $unattendPath -Value $UnattendXmlContent -Encoding UTF8
         Write-LabLog "unattend.xml injected at $unattendPath" -Level Info
     } finally {
-        Dismount-VHD -Path $VhdxPath
+        Dismount-VHD -Path $DiskPath
     }
 }
 
@@ -1321,7 +1492,8 @@ function New-LabVM {
         [string] $Locale = 'en-US',
 
         # VM Generation: 1 (BIOS/MBR, supports VHD/VHDX) or 2 (UEFI/GPT, VHDX only)
-        [ValidateSet(1, 2)] [int] $Generation = 2,
+        # If not specified, auto-detect based on file extension (.vhd = Gen1, .vhdx = Gen2)
+        [ValidateSet(1, 2)] [int] $Generation,
         [string] $CustomAdminName = '',
         [string] $CustomAdminPassword = '',
 
@@ -1332,14 +1504,25 @@ function New-LabVM {
         [string[]] $StaticDnsServers
     )
 
+    # Auto-detect VM generation based on file extension if not specified
+    # VHD files = Generation 1 (BIOS/MBR), VHDX files = Generation 2 (UEFI/GPT)
+    $sourceExt = [System.IO.Path]::GetExtension($GoldenVhdxPath).ToLower()
+    if (-not $Generation) {
+        $Generation = if ($sourceExt -eq '.vhd') { 1 } else { 2 }
+        Write-LabLog "Auto-detected VM Generation $Generation from file extension '$sourceExt'" -Level Info
+    }
+    
     $vmDir = Join-Path $VMRoot $VMName
     $vhdDir = Join-Path $vmDir 'Virtual Hard Disks'
     New-Item -Path $vhdDir -ItemType Directory -Force | Out-Null
-
-    $vmVhdxPath = Join-Path $vhdDir "$VMName.vhdx"
+    
+    # Use correct extension based on VM generation: Gen1=VHD, Gen2=VHDX
+    $ext = if ($Generation -eq 1) { '.vhd' } else { '.vhdx' }
+    $vmVhdxPath = Join-Path $vhdDir "$VMName$ext"
+    
     if (Test-Path $vmVhdxPath) {
         if ($Force) {
-            Write-LabLog "Removing existing VHDX at $vmVhdxPath (-Force specified)..." -Level Info
+            Write-LabLog "Removing existing file at $vmVhdxPath (-Force specified)..." -Level Info
             Remove-Item -Path $vmVhdxPath -Force | Out-Null
             
             # Also remove the VM if it exists
@@ -1349,7 +1532,7 @@ function New-LabVM {
                 Remove-VM -Name $VMName -Force | Out-Null
             }
         } else {
-            throw "A VHDX already exists at $vmVhdxPath - refusing to overwrite. Remove the existing VM/files first if you intend to recreate it."
+            throw "A file already exists at $vmVhdxPath - refusing to overwrite. Remove the existing VM/files first if you intend to recreate it."
         }
     }
 
@@ -1359,7 +1542,7 @@ function New-LabVM {
     $plainPassword = (New-Object PSCredential('placeholder', $LocalAdminPassword)).GetNetworkCredential().Password
     $unattendXml = New-LabUnattendXml -ComputerName $VMName -AdminPlainTextPassword $plainPassword -TimeZone $TimeZone -Locale $Locale `
         -CustomAdminName $CustomAdminName -CustomAdminPassword $CustomAdminPassword
-    Set-LabVhdxUnattend -VhdxPath $vmVhdxPath -UnattendXmlContent $unattendXml
+    Set-LabDiskUnattend -DiskPath $vmVhdxPath -UnattendXmlContent $unattendXml
 
     Write-LabLog "Creating VM '$VMName' (vCPU: $VCpuCount, Startup RAM: $($MemoryStartupBytes/1GB)GB, Generation: $Generation)..." -Level Step
     $vm = New-VM -Name $VMName -Generation $Generation -MemoryStartupBytes $MemoryStartupBytes -VHDPath $vmVhdxPath -SwitchName $SwitchName -Path $VMRoot -ErrorAction Stop
@@ -2226,13 +2409,13 @@ function ConvertTo-LabOSKey {
         return $null
     }
 
-    # Server SKU: distill 2016/2022/2025 from ProductName (build numbers would also
-    # work but naming is the most stable signal across the three).
+    # Server SKU: distill 2016/2019/2022/2025 from ProductName (build numbers would also
+    # work but naming is the most stable signal across the versions).
     switch -Regex ($ProductName) {
         '2025' { return 'Server2025' }
         '2022' { return 'Server2022' }
+        '2019' { return 'Server2019' }
         '2016' { return 'Server2016' }
-        '2019' { return 'Server2022' } # 2019 isn't an offered option; closest is 2022. Caller flags as approximation.
     }
     return $null
 }
@@ -2256,27 +2439,55 @@ function Find-LabMedia {
     $isoRoot  = Join-Path $MediaRoot 'ISO'
     $vhdxRoot = Join-Path $MediaRoot 'VHDX'
 
+    Write-LabLog "Scanning media folders:" -Level Info
+    Write-LabLog "  ISO folder: $isoRoot" -Level Info
+    Write-LabLog "  VHDX folder: $vhdxRoot" -Level Info
+
     foreach ($root in @($isoRoot, $vhdxRoot)) {
         if (Test-Path $root) {
-            # Scan for both .vhdx and .vhd files
-            $vhdFiles = @()
-            $vhdFiles += Get-ChildItem -Path $root -Filter "*.vhdx" -File -ErrorAction SilentlyContinue
-            $vhdFiles += Get-ChildItem -Path $root -Filter "*.vhd" -File -ErrorAction SilentlyContinue
-            foreach ($file in $vhdFiles) {
-                # Determine Kind based on file extension
-                $ext = [System.IO.Path]::GetExtension($file.FullName).ToLower()
-                $kind = if ($ext -eq '.vhdx') { 'Vhdx' } else { 'Vhd' }
-                
-                $items += [pscustomobject]@{
-                    Kind       = $kind
-                    Path       = $file.FullName
-                    SizeBytes  = $file.Length
-                    Source     = 'MediaCache'
-                    OSKey      = $null
-                    EditionID  = $null
-                    ProductName = $null
-                    InstallationType = $null
-                    Editions   = @()
+            # Scan for ISO files in ISO folder
+            if ($root -eq $isoRoot) {
+                Write-LabLog "  Scanning for ISO files..." -Level Info
+                $isoFiles = Get-ChildItem -Path $root -Filter "*.iso" -File -ErrorAction SilentlyContinue
+                foreach ($file in $isoFiles) {
+                    Write-LabLog "    Found ISO: $($file.Name) ($([math]::Round($file.Length / 1GB, 2)) GB)" -Level Info
+                    $items += [pscustomobject]@{
+                        Kind       = 'Iso'
+                        Path       = $file.FullName
+                        SizeBytes  = $file.Length
+                        Source     = 'MediaCache'
+                        OSKey      = $null
+                        EditionID  = $null
+                        ProductName = $null
+                        InstallationType = $null
+                        Editions   = @()
+                    }
+                }
+            }
+            
+            # Scan for VHDX/VHD files in VHDX folder
+            if ($root -eq $vhdxRoot) {
+                Write-LabLog "  Scanning for VHDX/VHD files..." -Level Info
+                $vhdFiles = @()
+                $vhdFiles += Get-ChildItem -Path $root -Filter "*.vhdx" -File -ErrorAction SilentlyContinue
+                $vhdFiles += Get-ChildItem -Path $root -Filter "*.vhd" -File -ErrorAction SilentlyContinue
+                foreach ($file in $vhdFiles) {
+                    # Determine Kind based on file extension
+                    $ext = [System.IO.Path]::GetExtension($file.FullName).ToLower()
+                    $kind = if ($ext -eq '.vhdx') { 'Vhdx' } else { 'Vhd' }
+                    
+                    Write-LabLog "    Found ${kind}: $($file.Name) ($([math]::Round($file.Length / 1GB, 2)) GB)" -Level Info
+                    $items += [pscustomobject]@{
+                        Kind       = $kind
+                        Path       = $file.FullName
+                        SizeBytes  = $file.Length
+                        Source     = 'MediaCache'
+                        OSKey      = $null
+                        EditionID  = $null
+                        ProductName = $null
+                        InstallationType = $null
+                        Editions   = @()
+                    }
                 }
             }
         }
@@ -2285,6 +2496,8 @@ function Find-LabMedia {
     # NOTE: Per-VM disk files under VMs\ are intentionally NOT scanned.
     # They are locked when the VM is running and are not reusable as golden images.
     # All reusable media lives under Media\VHDX\ and Media\ISO\ above.
+
+    Write-LabLog "Found $($items.Count) total media file(s) before deduplication" -Level Info
 
     # Deduplicate by path (in case same file appears in multiple scans)
     $uniqueItems = @()
@@ -2295,6 +2508,8 @@ function Find-LabMedia {
             $uniqueItems += $item
         }
     }
+
+    Write-LabLog "Found $($uniqueItems.Count) unique media file(s)" -Level Info
 
     return ,$uniqueItems
 }
@@ -2319,9 +2534,12 @@ function Read-LabIsoEditionInfo {
             throw "Could not find install.wim or install.esd inside $IsoPath."
         }
         $images = Get-WindowsImage -ImagePath $wimPath -ErrorAction Stop
-        return $images | ForEach-Object {
+        $result = $images | ForEach-Object {
             [pscustomobject]@{ ImageIndex = $_.ImageIndex; ImageName = $_.ImageName }
         }
+        # Ensure we always return an array (even for single item)
+        if (-not $result) { return @() }
+        return ,$result
     } finally {
         Dismount-DiskImage -ImagePath $IsoPath | Out-Null
     }
@@ -2347,7 +2565,7 @@ function Read-LabVhdxEditionInfo {
     $hiveKey = 'HKLM\LabOfflineSW'
     try {
         # Check if VHDX is already mounted by checking for attached disks with this path
-        $attachedDisks = Get-Disk | Where-Object { $_.BusType -eq 'File Backed Virtual' }
+        $attachedDisks = @(Get-Disk | Where-Object { $_.BusType -eq 'File Backed Virtual' })
         $alreadyMountedDisk = $null
         foreach ($disk in $attachedDisks) {
             try {
@@ -2405,7 +2623,7 @@ function Read-LabVhdxEditionInfo {
 
             $getValue = {
                 param($name)
-                $line = $query | Where-Object { $_ -match "^\s+$name\s+" } | Select-Object -First 1
+                $line = @($query | Where-Object { $_ -match "^\s+$name\s+" } | Select-Object -First 1)
                 if (-not $line) { return $null }
                 # Trailing field after the type is the value; split on whitespace runs.
                 $parts = @(($line -split '\s+') | Where-Object { $_ })
@@ -2462,35 +2680,67 @@ function Invoke-LabMediaScan {
 
     Write-LabLog ("Found {0} media file(s). Inspecting editions..." -f $items.Count) -Level Info
 
-    foreach ($item in $items) {
+    # Ensure items is a proper array (not nested)
+    if ($items -is [array] -and $items.Count -eq 1 -and $items[0] -is [array]) {
+        Write-LabLog "DEBUG: Unwrapping nested array" -Level Info
+        $items = $items[0]
+    }
+    
+    for ($i = 0; $i -lt $items.Count; $i++) {
+        $item = $items[$i]
+        # Debug: verify item properties exist
+        if (-not $item.PSObject.Properties['Editions']) {
+            Write-LabLog "DEBUG: Item at index $i missing Editions property. Type: $($item.GetType().Name), Properties: $($item.PSObject.Properties.Name -join ', ')" -Level Info
+        }
         try {
             if ($item.Kind -eq 'Iso') {
-                $editions = Read-LabIsoEditionInfo -IsoPath $item.Path
+                # Ensure Path is a string (not an array)
+                $isoPath = if ($item.Path -is [array]) { $item.Path[0] } else { $item.Path }
+                Write-LabLog "  Reading ISO edition info: $isoPath" -Level Info
+                $editions = Read-LabIsoEditionInfo -IsoPath $isoPath
+                # Ensure editions is an array
+                if (-not ($editions -is [array])) { $editions = @($editions) }
                 # An ISO can hold several editions; pick the first whose name maps to
                 # a known OSKey, else fall back to the first edition for display.
-                $item.Editions = $editions
-                $chosen = $null
-                foreach ($ed in $editions) {
-                    $guess = ConvertTo-LabOSKey -EditionID $ed.ImageName -ProductName $ed.ImageName -InstallationType $(if ($ed.ImageName -match 'Server') { 'Server' } else { 'Client' })
-                    if ($guess) { $chosen = $guess; break }
+                if ($editions -and $editions.Count -gt 0) {
+                    Write-LabLog "    Found $($editions.Count) edition(s) in ISO" -Level Info
+                    if ($items[$i].PSObject.Properties['Editions']) { $items[$i].Editions = $editions }
+                    $chosen = $null
+                    foreach ($ed in $editions) {
+                        if ($ed -and $ed.ImageName) {
+                            Write-LabLog "    Checking edition: $($ed.ImageName)" -Level Info
+                            $guess = ConvertTo-LabOSKey -EditionID $ed.ImageName -ProductName $ed.ImageName -InstallationType $(if ($ed.ImageName -match 'Server') { 'Server' } else { 'Client' })
+                            if ($guess) { $chosen = $guess; Write-LabLog "    Matched OSKey: $chosen" -Level Info; break }
+                        }
+                    }
+                    if ($items[$i].PSObject.Properties['OSKey']) { $items[$i].OSKey = $chosen }
+                    if ($items[$i].PSObject.Properties['EditionID'] -and $editions[0]) { $items[$i].EditionID = $editions[0].ImageName }
+                } else {
+                    Write-LabLog "  No editions found in ISO" -Level Warn
+                    if ($items[$i].PSObject.Properties['Editions']) { $items[$i].Editions = @() }
+                    if ($items[$i].PSObject.Properties['OSKey']) { $items[$i].OSKey = $null }
+                    if ($items[$i].PSObject.Properties['EditionID']) { $items[$i].EditionID = $null }
                 }
-                $item.OSKey = $chosen
-                $item.EditionID = if ($editions) { $editions[0].ImageName } else { $null }
             } else {
-                $info = Read-LabVhdxEditionInfo -VhdxPath $item.Path
+                # Ensure Path is a string (not an array)
+                $vhdxPath = if ($item.Path -is [array]) { $item.Path[0] } else { $item.Path }
+                $info = Read-LabVhdxEditionInfo -VhdxPath $vhdxPath
                 if ($info) {
                     # Safety check: ensure the object has all required properties
-                    if ($info.PSObject.Properties.Name -contains 'EditionID') { $item.EditionID = $info.EditionID }
-                    if ($info.PSObject.Properties.Name -contains 'ProductName') { $item.ProductName = $info.ProductName }
-                    if ($info.PSObject.Properties.Name -contains 'InstallationType') { $item.InstallationType = $info.InstallationType }
-                    if ($info.PSObject.Properties.Name -contains 'OSKey') { $item.OSKey = $info.OSKey }
+                    if ($items[$i].PSObject.Properties['EditionID'] -and $info.PSObject.Properties.Name -contains 'EditionID') { $items[$i].EditionID = $info.EditionID }
+                    if ($items[$i].PSObject.Properties['ProductName'] -and $info.PSObject.Properties.Name -contains 'ProductName') { $items[$i].ProductName = $info.ProductName }
+                    if ($items[$i].PSObject.Properties['InstallationType'] -and $info.PSObject.Properties.Name -contains 'InstallationType') { $items[$i].InstallationType = $info.InstallationType }
+                    if ($items[$i].PSObject.Properties['OSKey'] -and $info.PSObject.Properties.Name -contains 'OSKey') { $items[$i].OSKey = $info.OSKey }
                 }
-                $item.Editions = @()
+                if ($items[$i].PSObject.Properties['Editions']) { $items[$i].Editions = @() }
             }
         } catch {
-            Write-LabLog "Could not read edition from $($item.Path): $($_.Exception.Message)" -Level Warn
-            $item.OSKey = $null
-            $item.Editions = @()
+            # Ensure Path is a string for the error message
+            $errorMsgPath = if ($item.Path -is [array]) { $item.Path[0] } else { $item.Path }
+            Write-LabLog "Could not read edition from ${errorMsgPath}: $($_.Exception.Message)" -Level Warn
+            # Only set properties if they exist (handle nested array case)
+            if ($items[$i].PSObject.Properties['OSKey']) { $items[$i].OSKey = $null }
+            if ($items[$i].PSObject.Properties['Editions']) { $items[$i].Editions = @() }
         }
     }
 
@@ -2509,7 +2759,7 @@ function Invoke-LabMediaScan {
     $rows | Format-Table -AutoSize | Out-String | Write-Host
     
     # Warn if any media couldn't be read (likely because it's already mounted or in use)
-    $unreadable = $items | Where-Object { -not $_.OSKey -and $_.Source -eq 'MediaCache' }
+    $unreadable = @($items | Where-Object { -not $_.OSKey -and $_.Source -eq 'MediaCache' })
     if ($unreadable.Count -gt 0) {
         Write-Host "" -ForegroundColor Yellow
         Write-Host "WARNING: Could not read edition from $($unreadable.Count) cached media file(s)." -ForegroundColor Yellow
@@ -3034,9 +3284,9 @@ function Invoke-LabTearDown {
     Write-Host "so the next run reuses it instead of re-downloading." -ForegroundColor Cyan
     Write-Host ""
     Write-Host "  Fastest rebuild (no validation probing):" -ForegroundColor Green
-    Write-Host "    .\1.0.2.ps1 -SkipValidation" -ForegroundColor Green
+    Write-Host "    .\Begin.ps1 -SkipValidation" -ForegroundColor Green
     Write-Host "  Normal rebuild (validates state, builds what's missing):" -ForegroundColor Green
-    Write-Host "    .\1.0.2.ps1" -ForegroundColor Green
+    Write-Host "    .\Begin.ps1" -ForegroundColor Green
     Write-Host ""
     if ($RemoveSwitch) {
         Write-Host "The virtual switch + NAT were also removed. A rebuild will recreate them." -ForegroundColor Yellow
@@ -3060,34 +3310,25 @@ $Script:DefaultMediaSourcesContent = @'
     # ===========================================================================================
     # This is the ONLY file you should need to touch when a download stops working.
     #
-    # Windows 10 / 11 Home & Pro:
-    #   Fully automatic. Get-WindowsMedia uses the open-source "Fido" tool (the same engine
-    #   Rufus uses) to resolve a direct retail ISO link from Microsoft on every run, so there
-    #   is nothing to configure here for those editions.
+    # All Windows editions (including Home, Pro, Enterprise, and Server) require a one-time
+    # registration at Microsoft Evaluation Center. The resulting fwlink URL must be supplied
+    # below for each edition you want to deploy.
     #
-    # Windows 10 / 11 Enterprise, and Windows Server 2016 / 2022 / 2025:
-    #   Microsoft only distributes these as 90/180-day evaluation media through the Evaluation
-    #   Center (https://www.microsoft.com/evalcenter), which is gated behind a one-time, short
-    #   registration form (name / company / country - no purchase, just a form). There is no
-    #   public API for this step, so it can't be fully scripted. The good news: once you submit
-    #   that form, the URL you land on is a STABLE go.microsoft.com/fwlink/?linkid=NNNNNN
-    #   redirector that you can reuse indefinitely (it isn't a one-time tokenised link like the
-    #   consumer download pages use) - until Microsoft ships a new build and rotates the linkid,
-    #   which happens occasionally (every several months to a year or so).
+    # HOW TO GET / REFRESH A LINK (about 2 minutes, one time per OS):
+    #   1. Go to https://www.microsoft.com/evalcenter and pick the product (e.g. "Windows
+    #      Server 2025" or "Windows 11 Enterprise").
+    #   2. Click Download, fill in the short registration form.
+    #   3. On the confirmation page, RIGHT-CLICK the language/ISO download button and choose
+    #      "Copy link address" - do not click it, you want the URL, not the file.
+    #   4. Paste that URL as the value below for the matching key.
     #
-    #   HOW TO GET / REFRESH A LINK (about 2 minutes, one time per OS):
-    #     1. Go to https://www.microsoft.com/evalcenter and pick the product (e.g. "Windows
-    #        Server 2025" or "Windows 11 Enterprise").
-    #     2. Click Download, fill in the short registration form.
-    #     3. On the confirmation page, RIGHT-CLICK the language/ISO download button and choose
-    #        "Copy link address" - do not click it, you want the URL, not the file.
-    #     4. Paste that URL as the value below for the matching key.
-    #
-    #   The placeholder values below are NOT valid - replace them before deploying any VM that
-    #   needs Enterprise or Server media. Get-WindowsMedia will stop with a clear error and a
-    #   reminder of these steps if it hits a placeholder.
+    # The placeholder values below are NOT valid - replace them before deploying any VM that
+    # needs media. Get-WindowsMedia will stop with a clear error and a reminder of these steps
+    # if it hits a placeholder.
 
+    Win10Pro        = 'REPLACE_ME_GET_LINK_FROM_https://www.microsoft.com/evalcenter/evaluate-windows-10-pro'
     Win10Enterprise = 'REPLACE_ME_GET_LINK_FROM_https://www.microsoft.com/evalcenter/evaluate-windows-10-enterprise'
+    Win11Pro        = 'REPLACE_ME_GET_LINK_FROM_https://www.microsoft.com/evalcenter/evaluate-windows-11-pro'
     Win11Enterprise = 'REPLACE_ME_GET_LINK_FROM_https://www.microsoft.com/evalcenter/evaluate-windows-11-enterprise'
     Server2016      = 'REPLACE_ME_GET_LINK_FROM_https://www.microsoft.com/evalcenter/evaluate-windows-server-2016'
     Server2022      = 'REPLACE_ME_GET_LINK_FROM_https://www.microsoft.com/evalcenter/evaluate-windows-server-2022'
@@ -3423,9 +3664,10 @@ function Invoke-LabMediaSelection {
 
 
 $Script:ServerOSChoices = [ordered]@{
-    'Server2025' = 'Windows Server 2025'
-    'Server2022' = 'Windows Server 2022'
-    'Server2016' = 'Windows Server 2016'
+    'Server2025'   = 'Windows Server 2025'
+    'Server2022'   = 'Windows Server 2022'
+    'Server2019'   = 'Windows Server 2019'
+    'Server2016'   = 'Windows Server 2016'
 }
 $Script:AnyOSChoices = [ordered]@{
     'Win11Pro'        = 'Windows 11 Pro'
@@ -3434,6 +3676,7 @@ $Script:AnyOSChoices = [ordered]@{
     'Win10Enterprise' = 'Windows 10 Enterprise'
     'Server2025'      = 'Windows Server 2025'
     'Server2022'      = 'Windows Server 2022'
+    'Server2019'      = 'Windows Server 2019'
     'Server2016'      = 'Windows Server 2016'
 }
 
@@ -4160,14 +4403,8 @@ if ($Reset -or -not $ExistingConfig) {
         }
     }
     
-    # Initialize scannedMedia for this session (in case it wasn't loaded yet)
+    # Initialize scannedMedia for this session - will be populated by the main scan later
     $scannedMedia = @()
-    try {
-        $scannedMedia = Invoke-LabMediaScan -MediaRoot $Paths.Media -VMsRoot $Paths.VMs
-    } catch {
-        Write-LabLog "Media scan failed: $($_.Exception.Message)" -Level Warn
-        $scannedMedia = @()
-    }
     
     # Ensure MediaSource properties are set for all VMs (in case they were missing from old configs)
     $hasPriorMediaSelection = $false
@@ -4229,10 +4466,9 @@ if ($Reset -or -not $ExistingConfig) {
         }
         if ($vm.PSObject.Properties['MediaSource'] -and $vm.MediaSource.Type) { $hasPriorMediaSelection = $true }
     }
-    if (-not $hasPriorMediaSelection) {
-        Save-LabConfig -Config $LabConfig -Path $ConfigPath
-    }
 }
+# Note: MediaSource update logic moved to after the main media scan (line ~4505)
+# so it has actual media data to work with instead of an empty array
 $SafeModePassword = $DomainAdminSecurePassword  # deliberately reused - see wizard banner above
 
 $MediaSourcesPath = Join-Path $Paths.Config 'MediaSources.psd1'
@@ -4245,6 +4481,8 @@ $MediaSourcesPath = Join-Path $Paths.Config 'MediaSources.psd1'
 # falls back to "download fresh". On a resume it surfaces what's already on disk.
 $scannedMedia = @()
 try {
+    Write-Host ""
+    Write-Host "=== Scanning for Windows media (ISO, VHDX, VHD) ===" -ForegroundColor Cyan
     $scannedMedia = Invoke-LabMediaScan -MediaRoot $Paths.Media -VMsRoot $Paths.VMs
 } catch {
     Write-LabLog "Media scan failed: $($_.Exception.Message)" -Level Warn
@@ -4254,28 +4492,59 @@ try {
 # Ensure scannedMedia is always an array
 if (-not $scannedMedia) { $scannedMedia = @() }
 
-# Run the selection wizard unless -ScanOnly (which just reports and exits) or
-# unless every VM already has a persisted MediaSource from a prior run. We still
-# ask on -Reset so a re-plan can pick up newly-arrived media.
-$hasPriorMediaSelection = $false
-foreach ($dc in $LabConfig.DomainControllers) {
-    if ($dc.PSObject.Properties['MediaSource'] -and $dc.MediaSource.Type) { $hasPriorMediaSelection = $true }
-}
-foreach ($vm in $LabConfig.AdditionalVMs) {
-    if ($vm.PSObject.Properties['MediaSource'] -and $vm.MediaSource.Type) { $hasPriorMediaSelection = $true }
-}
-$shouldAskMedia = (-not $ScanOnly) -and ($Reset -or -not $hasPriorMediaSelection)
+Write-LabLog "Media scan complete. Found $($scannedMedia.Count) unique media file(s)" -Level Info
 
-if ($ScanOnly) {
+# Show summary of available media
+Write-Host ""
+Write-Host "=== Media Scan Summary ===" -ForegroundColor Cyan
+if ($scannedMedia.Count -eq 0) {
+    Write-Host "No cached ISO, VHDX, or VHD files found under Media folder." -ForegroundColor Yellow
+} else {
+    Write-Host "Found $($scannedMedia.Count) media file(s):" -ForegroundColor Green
+    
+    # Show detailed breakdown by type
+    $isoFiles = @($scannedMedia | Where-Object { $_.Kind -eq 'Iso' })
+    $vhdxFiles = @($scannedMedia | Where-Object { $_.Kind -eq 'Vhdx' })
+    $vhdFiles = @($scannedMedia | Where-Object { $_.Kind -eq 'Vhd' })
+    
+    if ($isoFiles.Count -gt 0) {
+        Write-Host "  ISO files: $($isoFiles.Count)" -ForegroundColor Cyan
+        foreach ($f in $isoFiles) {
+            Write-Host "    - $(Split-Path $f.Path -Leaf) [$($f.OSKey)]" -ForegroundColor DarkCyan
+        }
+    }
+    
+    if ($vhdxFiles.Count -gt 0) {
+        Write-Host "  VHDX files: $($vhdxFiles.Count)" -ForegroundColor Cyan
+        foreach ($f in $vhdxFiles) {
+            Write-Host "    - $(Split-Path $f.Path -Leaf) [$($f.OSKey)]" -ForegroundColor DarkCyan
+        }
+    }
+    
+    if ($vhdFiles.Count -gt 0) {
+        Write-Host "  VHD files: $($vhdFiles.Count)" -ForegroundColor Cyan
+        foreach ($f in $vhdFiles) {
+            Write-Host "    - $(Split-Path $f.Path -Leaf) [$($f.OSKey)]" -ForegroundColor DarkCyan
+        }
+    }
+    
     Write-Host ""
-    Write-Host "(-ScanOnly: media scan complete. Skipping media selection - no VMs will be built.)" -ForegroundColor DarkGray
-} elseif ($shouldAskMedia) {
-    if ($scannedMedia.Count -gt 0) {
-        Invoke-LabMediaSelection -MediaItems $scannedMedia -LabConfig $LabConfig
-        # Persist the per-VM MediaSource decisions so a resume doesn't re-ask.
-        Save-LabConfig -Config $LabConfig -Path $ConfigPath
-    } else {
-        Write-LabLog "No cached media found - every VM will download fresh." -Level Info
+    $mediaTable = $scannedMedia | ForEach-Object {
+        $genInfo = if ($_.Kind -eq 'Vhd') { '(Gen 1)' } elseif ($_.Kind -eq 'Vhdx') { '(Gen 2)' } else { '' }
+        [pscustomobject]@{
+            Kind   = $_.Kind
+            OSKey  = if ($_.OSKey) { $_.OSKey } else { '(unknown)' }
+            SizeGB = [math]::Round($_.SizeBytes / 1GB, 1)
+            Path   = Split-Path $_.Path -Leaf
+        }
+    }
+    $mediaTable | Format-Table -AutoSize | Out-String | Write-Host
+    
+    # Ask user if they want to proceed with media selection
+    Write-Host ""
+    $proceedWithSelection = Read-LabYesNo -Prompt "Proceed with media selection for VMs?" -Default $true
+    if (-not $proceedWithSelection) {
+        Write-Host "Skipping media selection - all VMs will download fresh." -ForegroundColor Cyan
         # Stamp a Download decision on each VM so the orchestration path is uniform.
         foreach ($dc in $LabConfig.DomainControllers) {
             if (-not ($dc.PSObject.Properties['MediaSource'] -and $dc.MediaSource.Type)) {
@@ -4287,6 +4556,83 @@ if ($ScanOnly) {
                 $vm | Add-Member -MemberType NoteProperty -Name MediaSource -Value ([pscustomobject]@{ Type = 'Download'; Path = $null; Generation = 2 }) -Force
             }
         }
+        Save-LabConfig -Config $LabConfig -Path $ConfigPath
+    }
+}
+
+# Run the selection wizard unless -ScanOnly (which just reports and exits) or
+# unless every VM already has a persisted MediaSource from a prior run. We still
+# ask on -Reset so a re-plan can pick up newly-arrived media.
+
+# Update MediaSource for all VMs based on scanned media (fixes wrong Generation values)
+$hasPriorMediaSelection = $false
+foreach ($dc in $LabConfig.DomainControllers) {
+    # Check if MediaSource is missing, incomplete, or has wrong Generation
+    $needsUpdate = -not $dc.PSObject.Properties['MediaSource'] -or -not $dc.MediaSource.Type
+    if (-not $needsUpdate -and $dc.MediaSource.Path -and $scannedMedia) {
+        # Check if the cached media matches and if Generation is correct
+        $cachedItem = @($scannedMedia | Where-Object { $_.Path -eq $dc.MediaSource.Path } | Select-Object -First 1)
+        if ($cachedItem) {
+            $expectedGen = if ($cachedItem.Kind -eq 'Vhd') { 1 } else { 2 }
+            if (-not $dc.MediaSource.Generation -or $dc.MediaSource.Generation -ne $expectedGen) {
+                $needsUpdate = $true
+            }
+        }
+    }
+    
+    if ($needsUpdate) {
+        # Try to find cached media for this VM
+        $best = Get-LabBestMediaMatch -MediaItems $scannedMedia -OSKey $dc.OSKey
+        if ($best) {
+            # Determine generation based on media kind: VHD=Gen1, VHDX/ISO=Gen2
+            $generation = if ($best.Kind -eq 'Vhd') { 1 } else { 2 }
+            $mediaSource = [ordered]@{ Type = $best.Kind; Path = $best.Path; Generation = $generation }
+            $dc | Add-Member -MemberType NoteProperty -Name MediaSource -Value ([pscustomobject]$mediaSource) -Force
+        } else {
+            $mediaSource = [ordered]@{ Type = 'Download'; Path = $null; Generation = 2 }
+            $dc | Add-Member -MemberType NoteProperty -Name MediaSource -Value ([pscustomobject]$mediaSource) -Force
+        }
+    }
+    if ($dc.PSObject.Properties['MediaSource'] -and $dc.MediaSource.Type) { $hasPriorMediaSelection = $true }
+}
+foreach ($vm in $LabConfig.AdditionalVMs) {
+    # Check if MediaSource is missing, incomplete, or has wrong Generation
+    $needsUpdate = -not $vm.PSObject.Properties['MediaSource'] -or -not $vm.MediaSource.Type
+    if (-not $needsUpdate -and $vm.MediaSource.Path -and $scannedMedia) {
+        # Check if the cached media matches and if Generation is correct
+        $cachedItem = @($scannedMedia | Where-Object { $_.Path -eq $vm.MediaSource.Path } | Select-Object -First 1)
+        if ($cachedItem) {
+            $expectedGen = if ($cachedItem.Kind -eq 'Vhd') { 1 } else { 2 }
+            if (-not $vm.MediaSource.Generation -or $vm.MediaSource.Generation -ne $expectedGen) {
+                $needsUpdate = $true
+            }
+        }
+    }
+    
+    if ($needsUpdate) {
+        # Try to find cached media for this VM
+        $best = Get-LabBestMediaMatch -MediaItems $scannedMedia -OSKey $vm.OSKey
+        if ($best) {
+            # Determine generation based on media kind: VHD=Gen1, VHDX/ISO=Gen2
+            $generation = if ($best.Kind -eq 'Vhd') { 1 } else { 2 }
+            $mediaSource = [ordered]@{ Type = $best.Kind; Path = $best.Path; Generation = $generation }
+            $vm | Add-Member -MemberType NoteProperty -Name MediaSource -Value ([pscustomobject]$mediaSource) -Force
+        } else {
+            $mediaSource = [ordered]@{ Type = 'Download'; Path = $null; Generation = 2 }
+            $vm | Add-Member -MemberType NoteProperty -Name MediaSource -Value ([pscustomobject]$mediaSource) -Force
+        }
+    }
+    if ($vm.PSObject.Properties['MediaSource'] -and $vm.MediaSource.Type) { $hasPriorMediaSelection = $true }
+}
+$shouldAskMedia = (-not $ScanOnly) -and ($Reset -or -not $hasPriorMediaSelection)
+
+if ($ScanOnly) {
+    Write-Host ""
+    Write-Host "(-ScanOnly: media scan complete. Skipping media selection - no VMs will be built.)" -ForegroundColor DarkGray
+} elseif ($shouldAskMedia -and $scannedMedia.Count -gt 0) {
+    if ($proceedWithSelection -ne $false) {
+        Invoke-LabMediaSelection -MediaItems $scannedMedia -LabConfig $LabConfig
+        # Persist the per-VM MediaSource decisions so a resume doesn't re-ask.
         Save-LabConfig -Config $LabConfig -Path $ConfigPath
     }
 }
@@ -4411,8 +4757,15 @@ for ($i = 0; $i -lt $allLabDCs.Count; $i++) {
         $customAdminName = if ($LabConfig.AddCustomAdmin) { $CustomAdminName } else { '' }
         $customAdminPassword = if ($LabConfig.AddCustomAdmin) { $CustomAdminPassword } else { '' }
         
-        # Use correct path property based on generation
-        $goldenPath = if ($vmGeneration -eq 1) { $media.VhdPath } else { $media.VhdxPath }
+        # Use correct path property based on media format (VHD vs VHDX)
+        # Media object returns either VhdPath or VhdxPath depending on OS version
+        if ($media.PSObject.Properties['VhdPath']) {
+            $goldenPath = $media.VhdPath
+            $vmGeneration = 1
+        } else {
+            $goldenPath = $media.VhdxPath
+            $vmGeneration = 2
+        }
         Write-LabLog "Using Generation $vmGeneration for '$($dc.Name)' (source: $($media.MediaSource), path: $goldenPath)" -Level Info
         
         New-LabVM -VMName $dc.Name -GoldenVhdxPath $goldenPath -VMRoot $Paths.VMs -SwitchName $LabConfig.SwitchName `
@@ -4534,8 +4887,8 @@ foreach ($vm in $LabConfig.AdditionalVMs) {
     
     $createStep = ("VM:{0}:Created" -f $vm.Name)
     if (Test-LabStepNeeded -Config $LabConfig -StepId $createStep) {
-        # Get generation from MediaSource if available, otherwise default to 2
-        $vmGeneration = if ($vm.MediaSource -and $vm.MediaSource.PSObject.Properties['Generation'] -and $vm.MediaSource.Generation) { $vm.MediaSource.Generation } else { 2 }
+        # Default to Generation 2 (VHDX). Will be overridden by Get-WindowsMedia if cached media exists
+        $vmGeneration = 2
         
         $mParams = Get-LabMediaParams -Node $vm
         $media = Get-WindowsMedia -OSKey $vm.OSKey -MediaRoot $Paths.Media -MediaSourcesPath $MediaSourcesPath `
@@ -4553,8 +4906,15 @@ foreach ($vm in $LabConfig.AdditionalVMs) {
         $customAdminName = if ($LabConfig.AddCustomAdmin) { $CustomAdminName } else { '' }
         $customAdminPassword = if ($LabConfig.AddCustomAdmin) { $CustomAdminPassword } else { '' }
         
-        # Use correct path property based on generation
-        $goldenPath = if ($vmGeneration -eq 1) { $media.VhdPath } else { $media.VhdxPath }
+        # Use correct path property based on media format (VHD vs VHDX)
+        # Media object returns either VhdPath or VhdxPath depending on OS version
+        if ($media.PSObject.Properties['VhdPath']) {
+            $goldenPath = $media.VhdPath
+            $vmGeneration = 1
+        } else {
+            $goldenPath = $media.VhdxPath
+            $vmGeneration = 2
+        }
         Write-LabLog "Using Generation $vmGeneration for '$($vm.Name)' (source: $($media.MediaSource), path: $goldenPath)" -Level Info
         
         Write-Progress -Activity "Building Lab" -Status "Creating VM '$($vm.Name)'..." -PercentComplete (70 + ($completedAdditional / $totalAdditionalVMs * 15))

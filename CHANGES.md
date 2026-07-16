@@ -229,6 +229,11 @@ This version adds intelligent VHD/VHDX selection based on Windows Server version
 - **Windows Server 2016/2019/2022**: Automatically uses VHD files with Generation 1 VMs (BIOS/MBR)
 - **Windows Server 2025**: Automatically uses VHDX files with Generation 2 VMs (UEFI/GPT required)
 
+**Media Priority Order**:
+When multiple cached media files exist for the same Windows edition, the script prioritizes them in this order:
+1. **Cached VHD/VHDX files** (from MediaCache) - preferred for faster deployment
+2. **ISO files** - used only if no cached golden images are available
+
 **Rationale**:
 - Server 2016/2019/2022 support both Generation 1 (VHD) and Generation 2 (VHDX)
 - Server 2025 requires UEFI firmware, which is only available in Generation 2 VMs
